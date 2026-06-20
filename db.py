@@ -32,9 +32,29 @@ def get_connection():
     )
 
 
+def get_live_connection():
+    """
+    Always returns a WORKING connection. The cached connection from
+    get_connection() can go stale if MySQL closes it server-side after a
+    timeout (Aiven's free tier also auto-powers-off the database after
+    inactivity) — Streamlit's cache doesn't know that happened, so it keeps
+    handing out the dead connection, causing "MySQL Connection not available".
+
+    This pings the cached connection first; if the ping fails, it clears
+    the cache and creates a fresh connection instead of crashing.
+    """
+    conn = get_connection()
+    try:
+        conn.ping(reconnect=True, attempts=3, delay=1)
+    except mysql.connector.Error:
+        get_connection.clear()  # drop the dead cached connection
+        conn = get_connection()  # cache_resource will create a brand new one
+    return conn
+
+
 def run_query(query, params=None, fetch=True):
     """Run a SELECT and return rows as list of dicts."""
-    conn = get_connection()
+    conn = get_live_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(query, params or ())
     rows = cursor.fetchall() if fetch else None
@@ -44,7 +64,7 @@ def run_query(query, params=None, fetch=True):
 
 def run_write(query, params=None):
     """Run an INSERT / UPDATE / DELETE and commit."""
-    conn = get_connection()
+    conn = get_live_connection()
     cursor = conn.cursor()
     cursor.execute(query, params or ())
     conn.commit()
