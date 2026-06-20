@@ -1,7 +1,2 @@
-streamlit
-mysql-connector-python
-plotly
-openpyxl
-Pillow
-requests
-google-generativeai
+streamlit>=1.32
+mysql-connector-python==8.4.0
