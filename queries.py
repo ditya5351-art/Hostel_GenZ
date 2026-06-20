@@ -109,7 +109,24 @@ def get_room_status_grid(billing_month=None):
 
 
 def get_room_occupancy_summary():
-    return run_query("SELECT * FROM v_room_occupancy ORDER BY room_number")
+    """Same data the v_room_occupancy VIEW used to give — written as a plain
+    query because shared/free hosting (InfinityFree etc.) usually blocks
+    CREATE VIEW permission for the MySQL user."""
+    return run_query(
+        """
+        SELECT
+            r.room_id,
+            r.room_number,
+            r.total_beds,
+            COUNT(ra.allocation_id) AS beds_occupied,
+            (r.total_beds - COUNT(ra.allocation_id)) AS beds_vacant
+        FROM rooms r
+        LEFT JOIN room_allocations ra
+            ON ra.room_id = r.room_id AND ra.is_current = 1
+        GROUP BY r.room_id, r.room_number, r.total_beds
+        ORDER BY r.room_number
+        """
+    )
 
 
 def get_all_rooms():
@@ -236,7 +253,14 @@ def change_student_room(admission_id, old_room_id, new_room_id, change_date):
     """Moves a student to a different room: closes the old allocation,
     opens a new one. Refuses if the new room has no vacant bed."""
     vacant = run_query(
-        "SELECT beds_vacant FROM v_room_occupancy WHERE room_id = %s", (new_room_id,)
+        """
+        SELECT (r.total_beds - COUNT(ra.allocation_id)) AS beds_vacant
+        FROM rooms r
+        LEFT JOIN room_allocations ra ON ra.room_id = r.room_id AND ra.is_current = 1
+        WHERE r.room_id = %s
+        GROUP BY r.room_id, r.total_beds
+        """,
+        (new_room_id,),
     )
     if not vacant or vacant[0]["beds_vacant"] <= 0:
         raise ValueError("Naye room mein koi vacant bed nahi hai.")
@@ -296,8 +320,16 @@ def delete_student_completely(student_id):
 
 def get_vacant_rooms():
     return run_query(
-        "SELECT room_id, room_number, beds_vacant FROM v_room_occupancy "
-        "WHERE beds_vacant > 0 ORDER BY room_number"
+        """
+        SELECT
+            r.room_id, r.room_number,
+            (r.total_beds - COUNT(ra.allocation_id)) AS beds_vacant
+        FROM rooms r
+        LEFT JOIN room_allocations ra ON ra.room_id = r.room_id AND ra.is_current = 1
+        GROUP BY r.room_id, r.room_number, r.total_beds
+        HAVING beds_vacant > 0
+        ORDER BY r.room_number
+        """
     )
 
 
@@ -307,6 +339,12 @@ def add_student_with_admission(full_name, father_name, mobile, course,
     Creates the student, their admission record, and allocates them to a room
     — all three steps the old app.py was missing (it only inserted into `students`
     with a `room_number` column that doesn't even exist in the schema).
+
+    Also generates a 'Pending' rent bill for EVERY month from joining_date up
+    to the current month — not just the current month. This matters when the
+    owner backdates a joining date (e.g. adding a student who actually joined
+    3 months ago) — without this, those past months would silently have no
+    bill at all and look like the student owes nothing for them.
     """
     student_id = run_write(
         """
@@ -332,15 +370,27 @@ def add_student_with_admission(full_name, father_name, mobile, course,
         (admission_id, room_id, joining_date),
     )
 
-    # Auto-create this month's pending rent bill so it shows up on the dashboard
-    run_write(
-        """
-        INSERT INTO payments (admission_id, billing_month, rent_amount, total_amount, payment_status)
-        VALUES (%s, %s, %s, %s, 'Pending')
-        ON DUPLICATE KEY UPDATE rent_amount = rent_amount
-        """,
-        (admission_id, current_month_str(), monthly_rent, monthly_rent),
-    )
+    # Generate a Pending bill for joining month through current month
+    # (if joining_date is in the future, this naturally creates just that one month)
+    cursor_date = date(joining_date.year, joining_date.month, 1)
+    today_month = date(date.today().year, date.today().month, 1)
+    start_month = min(cursor_date, today_month)  # handles future joining dates too
+    end_month = max(cursor_date, today_month)
+
+    m = start_month
+    while m <= end_month:
+        run_write(
+            """
+            INSERT INTO payments (admission_id, billing_month, rent_amount, total_amount, payment_status)
+            VALUES (%s, %s, %s, %s, 'Pending')
+            ON DUPLICATE KEY UPDATE rent_amount = rent_amount
+            """,
+            (admission_id, m, monthly_rent, monthly_rent),
+        )
+        if m.month == 12:
+            m = date(m.year + 1, 1, 1)
+        else:
+            m = date(m.year, m.month + 1, 1)
 
     return student_id
 
@@ -567,14 +617,18 @@ def get_pending_deposits():
     """Students whose security deposit isn't fully collected yet."""
     return run_query(
         """
-        SELECT a.admission_id, s.full_name, r.room_number,
-               v.deposit_expected, v.deposit_collected, v.deposit_due
-        FROM v_deposit_status v
-        JOIN admissions a ON a.admission_id = v.admission_id
+        SELECT
+            a.admission_id, s.full_name, r.room_number,
+            a.security_deposit AS deposit_expected,
+            COALESCE(SUM(dt.amount), 0) AS deposit_collected,
+            (a.security_deposit - COALESCE(SUM(dt.amount), 0)) AS deposit_due
+        FROM admissions a
         JOIN students s ON s.student_id = a.student_id
+        LEFT JOIN deposit_transactions dt ON dt.admission_id = a.admission_id
         LEFT JOIN room_allocations ra ON ra.admission_id = a.admission_id AND ra.is_current = 1
         LEFT JOIN rooms r ON r.room_id = ra.room_id
-        WHERE v.deposit_due > 0
+        GROUP BY a.admission_id, s.full_name, r.room_number, a.security_deposit
+        HAVING deposit_due > 0
         ORDER BY s.full_name
         """
     )
@@ -643,13 +697,17 @@ def get_all_admissions_with_deposit():
     """All students (not just pending) — for the deposit 'fix entry' selector."""
     return run_query(
         """
-        SELECT a.admission_id, s.full_name, r.room_number, v.deposit_expected,
-               v.deposit_collected, v.deposit_due
-        FROM v_deposit_status v
-        JOIN admissions a ON a.admission_id = v.admission_id
+        SELECT
+            a.admission_id, s.full_name, r.room_number,
+            a.security_deposit AS deposit_expected,
+            COALESCE(SUM(dt.amount), 0) AS deposit_collected,
+            (a.security_deposit - COALESCE(SUM(dt.amount), 0)) AS deposit_due
+        FROM admissions a
         JOIN students s ON s.student_id = a.student_id
+        LEFT JOIN deposit_transactions dt ON dt.admission_id = a.admission_id
         LEFT JOIN room_allocations ra ON ra.admission_id = a.admission_id AND ra.is_current = 1
         LEFT JOIN rooms r ON r.room_id = ra.room_id
+        GROUP BY a.admission_id, s.full_name, r.room_number, a.security_deposit
         ORDER BY s.full_name
         """
     )
@@ -664,13 +722,15 @@ def get_active_students_for_checkout():
     paid so far (this is the max that can be refunded)."""
     return run_query(
         """
-        SELECT a.admission_id, s.student_id, s.full_name, r.room_id, r.room_number,
-               a.monthly_rent, v.deposit_collected
+        SELECT
+            a.admission_id, s.student_id, s.full_name, r.room_id, r.room_number,
+            a.monthly_rent,
+            COALESCE((SELECT SUM(dt.amount) FROM deposit_transactions dt
+                      WHERE dt.admission_id = a.admission_id), 0) AS deposit_collected
         FROM admissions a
         JOIN students s ON s.student_id = a.student_id
         LEFT JOIN room_allocations ra ON ra.admission_id = a.admission_id AND ra.is_current = 1
         LEFT JOIN rooms r ON r.room_id = ra.room_id
-        LEFT JOIN v_deposit_status v ON v.admission_id = a.admission_id
         WHERE a.status = 'Active'
         ORDER BY s.full_name
         """
