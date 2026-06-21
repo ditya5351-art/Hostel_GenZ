@@ -140,6 +140,33 @@ def add_room(room_number, total_beds):
     )
 
 
+def add_rooms_bulk(prefix, start_num, end_num, total_beds):
+    """
+    Creates many rooms in ONE go — e.g. prefix='R-', start=1, end=10 makes
+    R-01 through R-10, each with `total_beds` beds. This avoids the
+    "click Add Room 10 times" pattern, which on a free-tier remote MySQL
+    (like Aiven's free plan) feels slow because every click is a full
+    Streamlit script rerun plus a fresh network round-trip.
+    Skips any room_number that already exists instead of erroring out.
+    """
+    created = 0
+    skipped = []
+    for n in range(start_num, end_num + 1):
+        room_number = f"{prefix}{n:02d}"
+        existing = run_query(
+            "SELECT room_id FROM rooms WHERE room_number = %s", (room_number,)
+        )
+        if existing:
+            skipped.append(room_number)
+            continue
+        run_write(
+            "INSERT INTO rooms (room_number, total_beds) VALUES (%s, %s)",
+            (room_number, total_beds),
+        )
+        created += 1
+    return created, skipped
+
+
 def update_room(room_id, room_number, total_beds):
     """
     Updates a room's number/bed-count. Refuses to shrink total_beds below
@@ -393,6 +420,56 @@ def add_student_with_admission(full_name, father_name, mobile, course,
             m = date(m.year, m.month + 1, 1)
 
     return student_id
+
+
+def add_students_bulk(student_rows):
+    """
+    Adds many students in one go — used by the CSV-paste bulk-import UI.
+    student_rows = [{"full_name":..., "father_name":..., "mobile":...,
+                      "course":..., "room_number":..., "monthly_rent":...,
+                      "security_deposit":..., "joining_date": date(...)}, ...]
+    Looks up room_id from room_number internally. Returns (success_count, errors)
+    where errors is a list of (row_index, reason) for rows that couldn't be added
+    — e.g. room already full, room doesn't exist — so one bad row doesn't stop
+    the rest of the batch (and you only made one connection's worth of round
+    trips instead of N separate "Add Student" clicks).
+    """
+    success_count = 0
+    errors = []
+    for i, row in enumerate(student_rows, start=1):
+        room_match = run_query(
+            "SELECT room_id FROM rooms WHERE room_number = %s", (row["room_number"],)
+        )
+        if not room_match:
+            errors.append((i, f"Room '{row['room_number']}' exist nahi karta"))
+            continue
+
+        room_id = room_match[0]["room_id"]
+        vacant_check = run_query(
+            """
+            SELECT (r.total_beds - COUNT(ra.allocation_id)) AS beds_vacant
+            FROM rooms r
+            LEFT JOIN room_allocations ra ON ra.room_id = r.room_id AND ra.is_current = 1
+            WHERE r.room_id = %s
+            GROUP BY r.room_id, r.total_beds
+            """,
+            (room_id,),
+        )
+        if not vacant_check or vacant_check[0]["beds_vacant"] <= 0:
+            errors.append((i, f"Room '{row['room_number']}' mein vacant bed nahi hai"))
+            continue
+
+        try:
+            add_student_with_admission(
+                row["full_name"], row.get("father_name", ""), row["mobile"],
+                row.get("course", ""), room_id, row["monthly_rent"],
+                row.get("security_deposit", 0), row["joining_date"],
+            )
+            success_count += 1
+        except Exception as e:
+            errors.append((i, str(e)))
+
+    return success_count, errors
 
 
 # ---------------------------------------------------------------
