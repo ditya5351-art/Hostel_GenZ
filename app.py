@@ -254,7 +254,7 @@ elif page == "🛏️ Rooms":
     with tab1:
         rooms = q.get_room_occupancy_summary()
         if rooms:
-            st.dataframe(rooms, use_container_width=True, hide_index=True)
+            st.dataframe(rooms, width='stretch', hide_index=True)
         else:
             st.info("Abhi koi room add nahi hua.")
 
@@ -430,7 +430,7 @@ elif page == "👥 Students":
 
     with tab3:
         students = q.get_all_students_with_room()
-        st.dataframe(students, use_container_width=True, hide_index=True)
+        st.dataframe(students, width='stretch', hide_index=True)
 
     with tab4:
         st.subheader("✏️ Student Ki Details Edit Karo")
@@ -580,7 +580,7 @@ elif page == "👥 Students":
         st.subheader("📜 Checkout History")
         history = q.get_checked_out_students()
         if history:
-            st.dataframe(history, use_container_width=True, hide_index=True)
+            st.dataframe(history, width='stretch', hide_index=True)
         else:
             st.info("Abhi koi student checkout nahi hua hai.")
 
@@ -649,7 +649,7 @@ elif page == "💰 Rent Collection":
 
     with tab2:
         ledger = q.get_rent_ledger()
-        st.dataframe(ledger, use_container_width=True, hide_index=True)
+        st.dataframe(ledger, width='stretch', hide_index=True)
         st.caption("Tip: kisi student ka paid amount cash+UPI mix mein tha toh woh breakdown 'Record Payment' tab ke through dikh sakta hai (aage add kar sakte hain receipt view mein).")
 
     with tab3:
