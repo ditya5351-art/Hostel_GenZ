@@ -247,7 +247,9 @@ if page == "📊 Dashboard":
 # =================================================================
 elif page == "🛏️ Rooms":
     st.title("🛏️ Rooms")
-    tab1, tab2, tab3 = st.tabs(["📋 All Rooms", "➕ Add Room", "✏️ Edit / Delete Room"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋 All Rooms", "➕ Add Room", "📦 Bulk Add Rooms", "✏️ Edit / Delete Room"
+    ])
 
     with tab1:
         rooms = q.get_room_occupancy_summary()
@@ -263,11 +265,38 @@ elif page == "🛏️ Rooms":
             if not room_number.strip():
                 st.error("Room number daalo.")
             else:
-                q.add_room(room_number.strip(), total_beds)
+                with st.spinner("Room add ho raha hai..."):
+                    q.add_room(room_number.strip(), total_beds)
                 st.success(f"Room {room_number} add ho gaya ✅")
                 st.rerun()
 
     with tab3:
+        st.subheader("📦 Ek Saath Multiple Rooms Add Karo")
+        st.caption(
+            "Ek-ek karke 'Add Room' click karne ke jagah, yahan se ek hi click mein "
+            "saare rooms ban jayenge — naye hostel set-up karte waqt yeh kaafi fast hai."
+        )
+        prefix = st.text_input("Room Number Prefix (e.g. 'R-')", value="R-")
+        col1, col2 = st.columns(2)
+        with col1:
+            start_num = st.number_input("Start Number", min_value=1, value=1)
+        with col2:
+            end_num = st.number_input("End Number", min_value=1, value=10)
+        bulk_beds = st.number_input("Beds per Room", min_value=1, max_value=10, value=2)
+
+        preview_count = max(0, end_num - start_num + 1)
+        st.caption(f"Preview: {prefix}{start_num:02d} se {prefix}{end_num:02d} tak — total {preview_count} rooms banenge.")
+
+        if st.button("📦 Bulk Create Rooms", type="primary", disabled=(end_num < start_num)):
+            with st.spinner(f"{preview_count} rooms ban rahe hain, thoda wait karo..."):
+                created, skipped = q.add_rooms_bulk(prefix.strip(), int(start_num), int(end_num), bulk_beds)
+            if created:
+                st.success(f"{created} naye rooms ban gaye ✅")
+            if skipped:
+                st.warning(f"Yeh already exist karte the, skip kiye gaye: {', '.join(skipped)}")
+            st.rerun()
+
+    with tab4:
         all_rooms = q.get_all_rooms()
         if not all_rooms:
             st.info("Pehle ek room add karo.")
@@ -285,7 +314,8 @@ elif page == "🛏️ Rooms":
             with c1:
                 if st.button("Save Changes", type="primary"):
                     try:
-                        q.update_room(selected["room_id"], new_number.strip(), new_beds)
+                        with st.spinner("Update ho raha hai..."):
+                            q.update_room(selected["room_id"], new_number.strip(), new_beds)
                         st.success("Room update ho gaya ✅")
                         st.rerun()
                     except ValueError as e:
@@ -293,7 +323,8 @@ elif page == "🛏️ Rooms":
             with c2:
                 if st.button("🗑️ Delete Room"):
                     try:
-                        q.delete_room(selected["room_id"])
+                        with st.spinner("Delete ho raha hai..."):
+                            q.delete_room(selected["room_id"])
                         st.success("Room delete ho gaya ✅")
                         st.rerun()
                     except ValueError as e:
@@ -304,8 +335,8 @@ elif page == "🛏️ Rooms":
 # =================================================================
 elif page == "👥 Students":
     st.title("👥 Students")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "➕ Add Student", "📋 View Students", "✏️ Edit Student",
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "➕ Add Student", "📦 Bulk Add Students", "📋 View Students", "✏️ Edit Student",
         "🚪 Checkout Student", "📜 Checkout History"
     ])
 
@@ -335,18 +366,73 @@ elif page == "👥 Students":
             elif not room_label:
                 st.error("Room assign karne ke liye pehle vacant bed banao.")
             else:
-                q.add_student_with_admission(
-                    full_name.strip(), father_name.strip(), mobile.strip(), course.strip(),
-                    room_options[room_label], monthly_rent, security_deposit, joining_date,
-                )
+                with st.spinner("Student add ho raha hai..."):
+                    q.add_student_with_admission(
+                        full_name.strip(), father_name.strip(), mobile.strip(), course.strip(),
+                        room_options[room_label], monthly_rent, security_deposit, joining_date,
+                    )
                 st.success(f"{full_name} ko successfully admit kar diya ✅ (Room {room_label.split(' ')[0]})")
                 st.rerun()
 
     with tab2:
+        st.subheader("📦 Ek Saath Multiple Students Add Karo")
+        st.caption(
+            "Ek-ek student add karne ke jagah, neeche ek line per student likho — "
+            "format: Naam, Mobile, Room Number, Monthly Rent\n\n"
+            "Example:\n"
+            "Aniket Sharma, 9876543210, R-01, 4500\n"
+            "Vikram Patil, 9876543211, R-02, 4500"
+        )
+        bulk_text = st.text_area(
+            "Students List (ek line ek student)",
+            height=200,
+            placeholder="Aniket Sharma, 9876543210, R-01, 4500\nVikram Patil, 9876543211, R-02, 4500",
+        )
+        bulk_joining_date = st.date_input("Sabki Joining Date (sabke liye same)", value=date.today(), key="bulk_joining_date")
+        bulk_deposit = st.number_input("Sabka Security Deposit (₹)", min_value=0, value=4500, step=100, key="bulk_deposit")
+
+        if st.button("📦 Bulk Add Students", type="primary"):
+            lines = [l.strip() for l in bulk_text.strip().split("\n") if l.strip()]
+            if not lines:
+                st.error("Pehle list paste karo.")
+            else:
+                student_rows = []
+                parse_errors = []
+                for idx, line in enumerate(lines, start=1):
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 4:
+                        parse_errors.append(f"Line {idx}: format galat hai (4 fields chahiye)")
+                        continue
+                    name, mobile_no, room_no, rent = parts[0], parts[1], parts[2], parts[3]
+                    try:
+                        rent_val = float(rent)
+                    except ValueError:
+                        parse_errors.append(f"Line {idx}: rent number nahi hai")
+                        continue
+                    student_rows.append({
+                        "full_name": name, "father_name": "", "mobile": mobile_no,
+                        "course": "", "room_number": room_no, "monthly_rent": rent_val,
+                        "security_deposit": bulk_deposit, "joining_date": bulk_joining_date,
+                    })
+
+                if parse_errors:
+                    st.error("Kuch lines mein format problem hai:\n" + "\n".join(parse_errors))
+
+                if student_rows:
+                    with st.spinner(f"{len(student_rows)} students add ho rahe hain, thoda wait karo..."):
+                        success_count, errors = q.add_students_bulk(student_rows)
+                    if success_count:
+                        st.success(f"{success_count} students successfully add ho gaye ✅")
+                    if errors:
+                        error_text = "\n".join(f"Row {i}: {reason}" for i, reason in errors)
+                        st.warning(f"Yeh rows add nahi ho payi:\n{error_text}")
+                    st.rerun()
+
+    with tab3:
         students = q.get_all_students_with_room()
         st.dataframe(students, use_container_width=True, hide_index=True)
 
-    with tab3:
+    with tab4:
         st.subheader("✏️ Student Ki Details Edit Karo")
         search_term = st.text_input("🔍 Naam type karke search karo", placeholder="e.g. Vikram")
 
@@ -430,7 +516,7 @@ elif page == "👥 Students":
         else:
             st.caption("Naam type karo upar search box mein.")
 
-    with tab4:
+    with tab5:
         st.subheader("🚪 Student ko Checkout Karo")
         active = q.get_active_students_for_checkout()
         if not active:
@@ -490,7 +576,7 @@ elif page == "👥 Students":
                     )
                     st.rerun()
 
-    with tab5:
+    with tab6:
         st.subheader("📜 Checkout History")
         history = q.get_checked_out_students()
         if history:
