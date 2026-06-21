@@ -1,5 +1,6 @@
 import mysql.connector
 import streamlit as st
+from decimal import Decimal
 
 
 @st.cache_resource
@@ -53,12 +54,27 @@ def get_live_connection():
 
 
 def run_query(query, params=None, fetch=True):
-    """Run a SELECT and return rows as list of dicts."""
+    """
+    Run a SELECT and return rows as list of dicts.
+
+    MySQL returns DECIMAL columns (rent, amounts, etc.) as Python Decimal
+    objects. Decimal mixed with None has been known to crash pandas/pyarrow's
+    native conversion code (the "double free or corruption" crash seen when
+    st.dataframe() tries to render such rows) on some platform/version
+    combinations — converting to plain float here sidesteps that entirely
+    and is precise enough for a rent/deposit amount.
+    """
     conn = get_live_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(query, params or ())
     rows = cursor.fetchall() if fetch else None
     cursor.close()
+
+    if rows:
+        for row in rows:
+            for key, value in row.items():
+                if isinstance(value, Decimal):
+                    row[key] = float(value)
     return rows
 
 
