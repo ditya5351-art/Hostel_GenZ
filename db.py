@@ -23,7 +23,7 @@ def get_connection():
     """
     return mysql.connector.connect(
         host=st.secrets["mysql"]["host"],
-        port=st.secrets["mysql"].get(port, 3306),
+        port=int(st.secrets["mysql"].get("port", 3306)),
         user=st.secrets["mysql"]["user"],
         password=st.secrets["mysql"]["password"],
         database=st.secrets["mysql"]["database"],
